@@ -3,7 +3,7 @@ import { X, Check, Info, HelpCircle, Award, Monitor, Upload, Users, Settings, Cl
 
 // --- CONSTANTS ---
 const CHANNEL_NAME = 'jeoparty_channel_v1';
-const TIME_UP_SOUND = 'https://assets.mixkit.co/active_storage/sfx/950/950-preview.mp3'; // Generic Buzzer
+const TIME_UP_SOUND = 'times-up.mp3'; // Generic Buzzer
 
 // --- CSV PARSER HELPER ---
 const parseCSV = (text) => {
