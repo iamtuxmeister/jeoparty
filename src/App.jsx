@@ -1,13 +1,13 @@
 import React, { useState, useEffect, useReducer, useRef, useMemo } from 'react';
-import { X, Check, Info, HelpCircle, Award, Monitor, Upload, Users, Settings, Clock, Volume2 } from 'lucide-react';
+import { X, Check, Info, HelpCircle, Award, Monitor, Upload, Users, Settings, Clock, Volume2, RotateCcw } from 'lucide-react';
 
 // --- CONSTANTS ---
 const CHANNEL_NAME = 'jeoparty_channel_v1';
-const TIME_UP_SOUND = 'times-up.mp3'; // Generic Buzzer
+const TIME_UP_SOUND = 'https://assets.mixkit.co/active_storage/sfx/950/950-preview.mp3'; // Generic Buzzer
+const FINAL_JEOPARDY_MUSIC = 'https://assets.mixkit.co/active_storage/sfx/2219/2219-preview.mp3'; // Dramatic, sustained thinking music
 
 // --- CSV PARSER HELPER ---
 const parseCSV = (text) => {
-  // FIX: Added closing slash to the regex: /\r?\n/
   const lines = text.split(/\r?\n/);
   const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
   
@@ -18,7 +18,6 @@ const parseCSV = (text) => {
 
   const rawClues = [];
   
-  // Simple regex for CSV parsing that handles quotes
   const parseLine = (line) => {
     const result = [];
     let startValueIndex = 0;
@@ -47,22 +46,44 @@ const parseCSV = (text) => {
       rawClues.push(clue);
     }
   }
+  
+  let finalClue = null;
+  const regularClues = [];
 
-  // Group by Category
+  // 1. Separate Final Jeopardy Clue
+  for (const clue of rawClues) {
+    // Check if the category or value is explicitly marked for Final Jeopardy
+    const categoryUpper = clue.category.toUpperCase().trim();
+    const valueUpper = clue.value.toUpperCase().trim();
+    
+    if (!finalClue && (categoryUpper.includes('FINAL JEOPARDY') || valueUpper === 'FJ' || valueUpper === 'FINAL')) {
+      finalClue = {
+        id: 'FINAL_JEOPARDY_CLUE', 
+        category: clue.category,
+        question: clue.question,
+        answer: clue.answer,
+        value: 0 // Value is 0 for wagering round
+      };
+    } else {
+      regularClues.push(clue);
+    }
+  }
+
+  // 2. Group regular clues by Category
   const categoriesMap = {};
-  rawClues.forEach((c, index) => {
+  regularClues.forEach((c, index) => {
     if (!categoriesMap[c.category]) {
       categoriesMap[c.category] = { id: index, title: c.category, clues: [] };
     }
     categoriesMap[c.category].clues.push({
-      id: `clue-${index}`,
+      id: `clue-${index}-${categoriesMap[c.category].clues.length}`,
       value: parseInt(c.value.replace(/[^0-9]/g, '')) || 0,
       question: c.question,
       answer: c.answer
     });
   });
 
-  // Sort clues by value and take top 5, take top 6 categories
+  // 3. Sort clues by value and take top 5, take top 6 categories
   const categories = Object.values(categoriesMap)
     .slice(0, 6)
     .map(cat => {
@@ -74,7 +95,7 @@ const parseCSV = (text) => {
       return cat;
     });
 
-  return categories;
+  return { categories, finalClue }; // Return both categories and the final clue
 };
 
 // --- STATE MANAGEMENT ---
@@ -89,6 +110,8 @@ const initialState = {
   gameStarted: false,
   timer: 5,
   isTimerRunning: false,
+  isFinalJeopardy: false, 
+  finalClue: null,       
 };
 
 function gameReducer(state, action) {
@@ -99,18 +122,17 @@ function gameReducer(state, action) {
         role: 'HOST', 
         categories: action.payload.categories, 
         teams: action.payload.teams,
-        gameStarted: true // Game is now started!
+        finalClue: action.payload.finalClue, 
+        gameStarted: true
       };
     case 'SYNC_STATE':
-      // Used by the Board to sync with Host
-      // The payload contains the complete state (including categories and gameStarted: true)
       return { ...state, ...action.payload };
     case 'SELECT_CLUE':
       return { 
         ...state, 
         activeClue: action.payload, 
         showAnswer: false,
-        timer: 5, // Reset timer on new clue
+        timer: 5, 
         isTimerRunning: false 
       };
     case 'REVEAL_ANSWER':
@@ -119,9 +141,10 @@ function gameReducer(state, action) {
       return {
         ...state,
         activeClue: null,
-        answeredClues: [...state.answeredClues, state.activeClue.id],
+        answeredClues: state.isFinalJeopardy ? state.answeredClues : [...state.answeredClues, state.activeClue.id],
         showAnswer: false,
-        isTimerRunning: false
+        isTimerRunning: false,
+        isFinalJeopardy: false, 
       };
     case 'UPDATE_SCORE':
       return {
@@ -135,11 +158,39 @@ function gameReducer(state, action) {
     case 'SET_ROLE':
       return { ...state, role: action.payload };
     case 'START_TIMER':
-      return { ...state, isTimerRunning: true, timer: 5 };
+      const duration = state.isFinalJeopardy ? 30 : 5; 
+      return { ...state, isTimerRunning: true, timer: duration };
     case 'TICK_TIMER':
       return { ...state, timer: Math.max(0, state.timer - 1) };
     case 'STOP_TIMER':
       return { ...state, isTimerRunning: false };
+    case 'SET_FINAL_JEOPARDY': 
+      const clue = state.finalClue;
+      // Mark Final Jeopardy as answered to prevent re-starting immediately
+      const newAnsweredClues = state.answeredClues.includes(clue.id) 
+        ? state.answeredClues
+        : [...state.answeredClues, clue.id];
+        
+      return {
+        ...state,
+        isFinalJeopardy: true,
+        activeClue: clue,
+        showAnswer: false,
+        timer: 30, 
+        isTimerRunning: false,
+        answeredClues: newAnsweredClues,
+      };
+    case 'RESET_BOARD':
+      // Keeps teams, scores, and questions, but resets the board state
+      return {
+        ...state,
+        activeClue: null,
+        answeredClues: [], 
+        showAnswer: false,
+        timer: 5,
+        isTimerRunning: false,
+        isFinalJeopardy: false, 
+      };
     default:
       return state;
   }
@@ -173,89 +224,63 @@ const SetupScreen = ({ onStart }) => {
     setError('');
   };
 
+  const getMockData = () => {
+    const categories = [
+        { id: 1, title: "HISTORY 101", clues: [{ id: 101, value: 200, question: "The first president of the United States.", answer: "Who is George Washington?" }, { id: 102, value: 400, question: "The year the Titanic sank.", answer: "What is 1912?" }, { id: 103, value: 600, question: "The empire that fell in 476 AD.", answer: "What is the Roman Empire?" }, { id: 104, value: 800, question: "She was the last active ruler of the Ptolemaic Kingdom of Egypt.", answer: "Who is Cleopatra?" }, { id: 105, value: 1000, question: "The war fought between the North and South in the US (1861-1865).", answer: "What is the Civil War?" }, ] },
+        { id: 2, title: "SCIENCE FICTION", clues: [{ id: 201, value: 200, question: "The father of Luke Skywalker.", answer: "Who is Darth Vader?" }, { id: 202, value: 400, question: "Author of 'Fahrenheit 451'.", answer: "Who is Ray Bradbury?" }, { id: 203, value: 600, question: "The ship commanded by Captain Kirk.", answer: "What is the USS Enterprise?" }, { id: 204, value: 800, question: "He wrote 'Do Androids Dream of Electric Sheep?'.", answer: "Who is Philip K. Dick?" }, { id: 205, value: 1000, question: "The planet Paul Atreides calls home in 'Dune'.", answer: "What is Caladan?" }, ] },
+        { id: 3, title: "GEOGRAPHY", clues: [{ id: 301, value: 200, question: "The largest continent by land area.", answer: "What is Asia?" }, { id: 302, value: 400, question: "The capital of France.", answer: "What is Paris?" }, { id: 303, value: 600, question: "The longest river in South America.", answer: "What is the Amazon River?" }, { id: 304, value: 800, question: "Country known as the Land of the Rising Sun.", answer: "What is Japan?" }, { id: 305, value: 1000, question: "The smallest country in the world.", answer: "What is Vatican City?" }, ] },
+        { id: 4, title: "TECH TALK", clues: [{ id: 401, value: 200, question: "The company that makes the iPhone.", answer: "What is Apple?" }, { id: 402, value: 400, question: "CEO of Tesla and SpaceX.", answer: "Who is Elon Musk?" }, { id: 403, value: 600, question: "The programming language this app is built with.", answer: "What is JavaScript (or React)?" }, { id: 404, value: 800, question: "The main database used by Wikipedia.", answer: "What is MariaDB/MySQL?" }, { id: 405, value: 1000, question: "The year the World Wide Web was invented.", answer: "What is 1989?" }, ] },
+        { id: 5, title: "ANIMAL KINGDOM", clues: [{ id: 501, value: 200, question: "The fastest land animal.", answer: "What is the Cheetah?" }, { id: 502, value: 400, question: "The largest mammal in the world.", answer: "What is the Blue Whale?" }, { id: 503, value: 600, question: "A group of lions is called this.", answer: "What is a Pride?" }, { id: 504, value: 800, question: "The only mammal capable of true flight.", answer: "What is the Bat?" }, { id: 505, value: 1000, question: "The number of hearts an octopus has.", answer: "What is Three?" }, ] },
+        { id: 6, title: "LITERATURE", clues: [{ id: 601, value: 200, question: "He wrote 'Romeo and Juliet'.", answer: "Who is William Shakespeare?" }, { id: 602, value: 400, question: "The wizarding school Harry Potter attends.", answer: "What is Hogwarts?" }, { id: 603, value: 600, question: "Author of 'To Kill a Mockingbird'.", answer: "Who is Harper Lee?" }, { id: 604, value: 800, question: "The Great Gatsby's first name.", answer: "Who is Jay?" }, { id: 605, value: 1000, question: "The pen name of Samuel Clemens.", answer: "Who is Mark Twain?" }, ] }
+    ];
+    
+    // --- Mock Final Jeopardy Clue ---
+    const finalClue = {
+      id: 'FINAL_JEOPARDY_CLUE', 
+      category: 'WORLD CAPITALS', 
+      question: 'This city, whose name means "peace," is the only place ever to have hosted the Summer and Winter Olympic Games.', 
+      answer: 'What is Beijing?',
+      value: 0 
+    };
+    return { categories, finalClue };
+  };
+
+  const getFallbackFinalClue = () => ({
+    id: 'FINAL_JEOPARDY_FALLBACK', 
+    category: 'FALLBACK CLUE', 
+    question: 'A Final Jeoparty question was not found in your CSV. This is the fallback question.', 
+    answer: 'What is "Thank you for playing!"?',
+    value: 0 
+  });
+
+
   const startGame = async () => {
     setIsLoading(true);
     try {
       let categories = [];
+      let finalClue = null;
+      
       if (file) {
         const text = await file.text();
-        categories = parseCSV(text);
+        const parsedData = parseCSV(text); // Returns { categories, finalClue }
+        categories = parsedData.categories;
+        finalClue = parsedData.finalClue; // Can be null if not found
       } else {
-        // Default Mock Data
-        categories = [
-            {
-              id: 1,
-              title: "HISTORY 101",
-              clues: [
-                { id: 101, value: 200, question: "The first president of the United States.", answer: "Who is George Washington?" },
-                { id: 102, value: 400, question: "The year the Titanic sank.", answer: "What is 1912?" },
-                { id: 103, value: 600, question: "The empire that fell in 476 AD.", answer: "What is the Roman Empire?" },
-                { id: 104, value: 800, question: "She was the last active ruler of the Ptolemaic Kingdom of Egypt.", answer: "Who is Cleopatra?" },
-                { id: 105, value: 1000, question: "The war fought between the North and South in the US (1861-1865).", answer: "What is the Civil War?" },
-              ]
-            },
-            {
-              id: 2,
-              title: "SCIENCE FICTION",
-              clues: [
-                { id: 201, value: 200, question: "The father of Luke Skywalker.", answer: "Who is Darth Vader?" },
-                { id: 202, value: 400, question: "Author of 'Fahrenheit 451'.", answer: "Who is Ray Bradbury?" },
-                { id: 203, value: 600, question: "The ship commanded by Captain Kirk.", answer: "What is the USS Enterprise?" },
-                { id: 204, value: 800, question: "He wrote 'Do Androids Dream of Electric Sheep?'.", answer: "Who is Philip K. Dick?" },
-                { id: 205, value: 1000, question: "The planet Paul Atreides calls home in 'Dune'.", answer: "What is Caladan?" },
-              ]
-            },
-            {
-              id: 3,
-              title: "GEOGRAPHY",
-              clues: [
-                { id: 301, value: 200, question: "The largest continent by land area.", answer: "What is Asia?" },
-                { id: 302, value: 400, question: "The capital of France.", answer: "What is Paris?" },
-                { id: 303, value: 600, question: "The longest river in South America.", answer: "What is the Amazon River?" },
-                { id: 304, value: 800, question: "Country known as the Land of the Rising Sun.", answer: "What is Japan?" },
-                { id: 305, value: 1000, question: "The smallest country in the world.", answer: "What is Vatican City?" },
-              ]
-            },
-            {
-              id: 4,
-              title: "TECH TALK",
-              clues: [
-                { id: 401, value: 200, question: "The company that makes the iPhone.", answer: "What is Apple?" },
-                { id: 402, value: 400, question: "CEO of Tesla and SpaceX.", answer: "Who is Elon Musk?" },
-                { id: 403, value: 600, question: "The programming language this app is built with.", answer: "What is JavaScript (or React)?" },
-                { id: 404, value: 800, question: "The main database used by Wikipedia.", answer: "What is MariaDB/MySQL?" },
-                { id: 405, value: 1000, question: "The year the World Wide Web was invented.", answer: "What is 1989?" },
-              ]
-            },
-            {
-              id: 5,
-              title: "ANIMAL KINGDOM",
-              clues: [
-                { id: 501, value: 200, question: "The fastest land animal.", answer: "What is the Cheetah?" },
-                { id: 502, value: 400, question: "The largest mammal in the world.", answer: "What is the Blue Whale?" },
-                { id: 503, value: 600, question: "A group of lions is called this.", answer: "What is a Pride?" },
-                { id: 504, value: 800, question: "The only mammal capable of true flight.", answer: "What is the Bat?" },
-                { id: 505, value: 1000, question: "The number of hearts an octopus has.", answer: "What is Three?" },
-              ]
-            },
-            {
-              id: 6,
-              title: "LITERATURE",
-              clues: [
-                { id: 601, value: 200, question: "He wrote 'Romeo and Juliet'.", answer: "Who is William Shakespeare?" },
-                { id: 602, value: 400, question: "The wizarding school Harry Potter attends.", answer: "What is Hogwarts?" },
-                { id: 603, value: 600, question: "Author of 'To Kill a Mockingbird'.", answer: "Who is Harper Lee?" },
-                { id: 604, value: 800, question: "The Great Gatsby's first name.", answer: "Who is Jay?" },
-                { id: 605, value: 1000, question: "The pen name of Samuel Clemens.", answer: "Who is Mark Twain?" },
-              ]
-            }
-        ];
+        const mockData = getMockData();
+        categories = mockData.categories;
+        finalClue = mockData.finalClue;
       }
 
-      if (categories.length === 0) throw new Error("No valid categories found.");
+      if (categories.length === 0) throw new Error("No valid categories found for the main board. Ensure your CSV has valid rows.");
+      
+      // Use fallback if CSV parsing didn't find one and no mock data was used.
+      if (!finalClue) {
+         finalClue = getFallbackFinalClue();
+         console.warn("Final Jeopardy clue was not found in the CSV. Using default mock clue.");
+      }
 
       const teams = teamNames.map((name, i) => ({ id: i + 1, name, score: 0 }));
-      onStart(teams, categories);
+      onStart(teams, categories, finalClue);
     } catch (err) {
       setError(err.message);
       setIsLoading(false);
@@ -285,6 +310,11 @@ const SetupScreen = ({ onStart }) => {
                 <span className="text-xs text-gray-400 mt-1">Optional (Defaults available)</span>
               </label>
             </div>
+            {file && (
+              <p className="text-xs text-gray-500 mt-2">
+                Note: Ensure one row has **"FINAL JEOPARDY"** in the Category column.
+              </p>
+            )}
             {error && <p className="text-red-500 text-xs mt-2">{error}</p>}
           </div>
 
@@ -371,12 +401,151 @@ const GameBoard = ({ categories, answeredClues, onClueClick, isHost }) => (
   </div>
 );
 
+// --- FINAL JEOPARDY HOST CONTROLS COMPONENT ---
+const FinalJeopardyHostControls = ({ state, dispatch }) => {
+  const [wagers, setWagers] = useState(state.teams.reduce((acc, team) => ({ ...acc, [team.id]: '' }), {}));
+  const [results, setResults] = useState(state.teams.reduce((acc, team) => ({ ...acc, [team.id]: 'PENDING' }), {})); // PENDING, CORRECT, INCORRECT
+
+  const handleWagerChange = (teamId, value) => {
+    setWagers(prev => ({ ...prev, [teamId]: value }));
+  };
+
+  const handleWagerBlur = (teamId) => {
+    // Enforce max wager = current score and min wager = 0
+    const teamScore = state.teams.find(t => t.id === teamId)?.score || 0;
+    let wager = parseInt(wagers[teamId]) || 0;
+    
+    wager = Math.max(0, wager);
+    wager = Math.min(teamScore, wager);
+
+    setWagers(prev => ({ ...prev, [teamId]: wager.toString() }));
+  };
+
+  const handleResultChange = (teamId, result) => {
+    setResults(prev => ({ ...prev, [teamId]: result }));
+  };
+  
+  const calculateFinalScore = () => {
+    state.teams.forEach(team => {
+      const teamId = team.id;
+      const wager = parseInt(wagers[teamId]) || 0;
+      const result = results[teamId];
+      let points = 0;
+
+      if (result === 'CORRECT') {
+        points = wager;
+      } else if (result === 'INCORRECT') {
+        points = -wager;
+      }
+      
+      // Dispatch update for all teams
+      dispatch({ type: 'UPDATE_SCORE', payload: { teamId, points } });
+    });
+    
+    // Close the clue after scoring
+    dispatch({ type: 'CLOSE_CLUE' });
+  };
+  
+  // Scoring is ready if all teams have a result (CORRECT or INCORRECT)
+  const isScoringReady = state.teams.every(t => results[t.id] !== 'PENDING');
+
+  return (
+    <>
+      <div className="flex flex-wrap justify-center gap-4 w-full">
+        {/* Timer Control */}
+        <button 
+          onClick={() => dispatch({ type: state.isTimerRunning ? 'STOP_TIMER' : 'START_TIMER' })}
+          className={`px-6 py-3 font-bold text-lg rounded shadow-lg flex items-center gap-2 ${state.isTimerRunning ? 'bg-red-600 hover:bg-red-700 text-white' : 'bg-blue-600 hover:bg-blue-700 text-white'}`}
+          disabled={state.showAnswer}
+        >
+          <Clock size={20} />
+          {state.isTimerRunning ? 'Stop Timer' : 'Start 30s Timer'}
+        </button>
+
+        {/* Reveal/Finalize Control */}
+        {!state.showAnswer ? (
+          <button 
+            onClick={() => dispatch({ type: 'REVEAL_ANSWER' })}
+            className="px-8 py-3 bg-yellow-500 hover:bg-yellow-400 text-blue-900 font-bold text-xl rounded shadow-lg transition-transform hover:scale-105"
+            disabled={state.isTimerRunning}
+          >
+            Reveal Final Answer
+          </button>
+        ) : (
+          <button 
+            onClick={calculateFinalScore}
+            className={`px-8 py-3 font-bold text-xl rounded shadow-lg transition-transform hover:scale-105 ${isScoringReady ? 'bg-green-600 hover:bg-green-700 text-white' : 'bg-gray-400 text-gray-700 cursor-not-allowed'}`}
+            disabled={!isScoringReady}
+          >
+            Finalize Scores & End Round
+          </button>
+        )}
+      </div>
+
+      {/* Final Jeopardy Wagers and Results (Only visible after answer is revealed) */}
+      {state.showAnswer && (
+        <div className="w-full border-t border-gray-700 pt-4 mt-2">
+          <h4 className="text-lg font-bold text-yellow-400 mb-3">Wagering and Scoring</h4>
+          <div className="flex flex-wrap justify-center gap-4">
+            {state.teams.map(team => (
+              <div key={team.id} className="flex flex-col items-center bg-slate-800 p-3 rounded-lg border border-slate-600 min-w-[200px]">
+                <span className="font-bold text-white mb-2 truncate max-w-[180px] text-base">{team.name} (Score: {team.score})</span>
+                
+                <input
+                  type="number"
+                  placeholder={`Max Wager: ${team.score}`}
+                  value={wagers[team.id]}
+                  onChange={(e) => handleWagerChange(team.id, e.target.value)}
+                  onBlur={() => handleWagerBlur(team.id)}
+                  className="w-full p-2 mb-3 text-center rounded text-black font-mono font-bold text-sm"
+                  disabled={!state.showAnswer}
+                  max={team.score}
+                  min="0"
+                />
+
+                <div className="flex gap-2">
+                  <button 
+                    onClick={() => handleResultChange(team.id, 'CORRECT')}
+                    className={`p-2 rounded text-white transition-colors shadow-md flex items-center gap-1 ${results[team.id] === 'CORRECT' ? 'bg-green-500' : 'bg-green-700 hover:bg-green-600'}`}
+                    disabled={!state.showAnswer}
+                  >
+                    <Check size={16} /> Correct
+                  </button>
+                  <button 
+                    onClick={() => handleResultChange(team.id, 'INCORRECT')}
+                    className={`p-2 rounded text-white transition-colors shadow-md flex items-center gap-1 ${results[team.id] === 'INCORRECT' ? 'bg-red-500' : 'bg-red-700 hover:bg-red-600'}`}
+                    disabled={!state.showAnswer}
+                  >
+                    <X size={16} /> Incorrect
+                  </button>
+                  {/* Reset to Pending button if needed */}
+                  {results[team.id] !== 'PENDING' && (
+                    <button 
+                        onClick={() => handleResultChange(team.id, 'PENDING')}
+                        className="p-2 rounded text-white transition-colors shadow-md bg-gray-500 hover:bg-gray-600"
+                        title="Reset result"
+                    >
+                        <RotateCcw size={16} />
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </>
+  );
+};
+
 // --- MAIN APP COMPONENT ---
 
 export default function App() {
   const [state, dispatch] = useReducer(gameReducer, initialState);
   const channelRef = useRef(null);
   const audioRef = useRef(new Audio(TIME_UP_SOUND));
+  const finalAudioRef = useRef(new Audio(FINAL_JEOPARDY_MUSIC));
+  finalAudioRef.current.loop = true; 
 
   // --- 1. BROADCAST CHANNEL SETUP ---
   useEffect(() => {
@@ -384,8 +553,6 @@ export default function App() {
     
     channelRef.current.onmessage = (event) => {
       if (event.data && event.data.type === 'SYNC_STATE') {
-        // When a SYNC_STATE message is received, update the local state with the payload.
-        // This is the mechanism that "starts the game" on the Board when launched.
         dispatch({ type: 'SYNC_STATE', payload: event.data.payload });
       }
     };
@@ -399,53 +566,9 @@ export default function App() {
     return () => channelRef.current.close();
   }, []);
 
-  // --- 2. SYNC HOST STATE TO BOARD (Real-time updates) ---
-  useEffect(() => {
-    // This effect ensures subsequent score, clue, and timer updates are broadcast.
-    // It keeps the board updated after the initial sync.
-    if (state.role === 'HOST' && state.categories.length > 0 && channelRef.current) { 
-      // This is a throttled, continuous sync. The initial sync is now triggered by the button.
-      const timeout = setTimeout(() => {
-        channelRef.current.postMessage({
-          type: 'SYNC_STATE',
-          payload: {
-            role: 'BOARD', // Force receiver to be board
-            categories: state.categories,
-            teams: state.teams,
-            activeClue: state.activeClue,
-            answeredClues: state.answeredClues,
-            showAnswer: state.showAnswer,
-            gameStarted: true,
-            timer: state.timer,
-            isTimerRunning: state.isTimerRunning
-          }
-        });
-      }, 50); // Small debounce
-
-      return () => clearTimeout(timeout);
-    }
-  }, [state.teams, state.activeClue, state.answeredClues, state.showAnswer, state.timer, state.isTimerRunning]); 
-
-  // --- 3. TIMER LOGIC ---
-  useEffect(() => {
-    let interval;
-    if (state.isTimerRunning && state.timer > 0) {
-      interval = setInterval(() => {
-        dispatch({ type: 'TICK_TIMER' });
-      }, 1000);
-    } else if (state.isTimerRunning && state.timer === 0) {
-       // Timer hit zero
-       audioRef.current.play().catch(e => console.log("Audio play failed", e));
-       dispatch({ type: 'STOP_TIMER' });
-    }
-    return () => clearInterval(interval);
-  }, [state.isTimerRunning, state.timer]);
-
-
-  // --- HANDLERS ---
+  // --- HANDLERS: SYNC & LAUNCH ---
   
   const syncGameState = () => {
-    // This function forces the complete state sync (including categories) to the Board channel.
     if (state.role === 'HOST' && state.categories.length > 0 && channelRef.current) {
       channelRef.current.postMessage({
         type: 'SYNC_STATE',
@@ -458,7 +581,9 @@ export default function App() {
           showAnswer: state.showAnswer,
           gameStarted: true,
           timer: state.timer,
-          isTimerRunning: state.isTimerRunning
+          isTimerRunning: state.isTimerRunning,
+          isFinalJeopardy: state.isFinalJeopardy, 
+          finalClue: state.finalClue, 
         }
       });
       console.log("Game state synchronized to board channel.");
@@ -466,7 +591,6 @@ export default function App() {
   };
 
   const launchBoard = () => {
-    // This function ONLY opens the new window. The sync must be done first via the Start Game button.
     const width = 1280;
     const height = 720;
     const left = (window.screen.width - width) / 2;
@@ -478,19 +602,65 @@ export default function App() {
     );
   };
 
+  const resetBoard = () => {
+    dispatch({ type: 'RESET_BOARD' });
+    syncGameState(); 
+  };
+
+  // --- 2. SYNC HOST STATE TO BOARD (Real-time updates) ---
+  useEffect(() => {
+    if (state.role === 'HOST' && state.categories.length > 0 && channelRef.current) { 
+      const timeout = setTimeout(() => {
+        syncGameState(); 
+      }, 50); 
+
+      return () => clearTimeout(timeout);
+    }
+  }, [state.teams, state.activeClue, state.answeredClues, state.showAnswer, state.timer, state.isTimerRunning, state.isFinalJeopardy]); 
+
+  // --- 3. TIMER LOGIC & MUSIC CONTROL ---
+  useEffect(() => {
+    let interval;
+    if (state.isTimerRunning && state.timer > 0) {
+      if (state.isFinalJeopardy) {
+        audioRef.current.pause(); 
+        finalAudioRef.current.play().catch(e => console.log("Final audio play failed", e));
+      } else {
+        finalAudioRef.current.pause(); 
+      }
+      
+      interval = setInterval(() => {
+        dispatch({ type: 'TICK_TIMER' });
+      }, 1000);
+      
+    } else if (state.isTimerRunning && state.timer === 0) {
+       // Timer hit zero
+       finalAudioRef.current.pause();
+       finalAudioRef.current.currentTime = 0;
+       
+       audioRef.current.play().catch(e => console.log("Audio play failed", e));
+       dispatch({ type: 'STOP_TIMER' });
+    } else if (!state.isTimerRunning) {
+      // Ensure music stops if timer is manually stopped or the clue is closed
+      finalAudioRef.current.pause();
+      finalAudioRef.current.currentTime = 0;
+    }
+    return () => clearInterval(interval);
+  }, [state.isTimerRunning, state.timer, state.isFinalJeopardy]);
+
+
   if (state.role === 'SETUP') {
-    return <SetupScreen onStart={(teams, categories) => dispatch({ type: 'INIT_GAME', payload: { teams, categories } })} />;
+    return <SetupScreen onStart={(teams, categories, finalClue) => dispatch({ type: 'INIT_GAME', payload: { teams, categories, finalClue } })} />;
   }
 
   // --- BOARD WAITING SCREEN ---
-  // If the role is BOARD and categories are empty, it means the sync message hasn't arrived yet.
   if (state.role === 'BOARD' && state.categories.length === 0) {
     return (
       <div className="min-h-screen bg-slate-900 text-white flex items-center justify-center font-sans">
         <div className="text-center p-8 border-4 border-yellow-400 rounded-xl bg-blue-900/50 shadow-2xl">
           <Monitor size={48} className="text-yellow-400 mx-auto mb-4 animate-pulse" />
           <h2 className="text-2xl font-bold">Waiting for Host Synchronization...</h2>
-          <p className="mt-2 text-gray-300">The host must click **'Start Game (Sync)'** and then **'Launch Board'** to display the questions.</p>
+          <p className="mt-2 text-gray-300">The host must click **'Start Game'** to display the questions.</p>
         </div>
       </div>
     );
@@ -524,16 +694,37 @@ export default function App() {
 
         {state.role === 'HOST' && (
           <div className="flex gap-2 shrink-0">
-            {/* NEW: Start Game Sync button */}
+            
+            {/* 1. Reset Board Button (Moved Left) */}
+            <button 
+              onClick={resetBoard}
+              className="flex items-center gap-2 bg-red-600 hover:bg-red-700 px-4 py-2 rounded font-bold text-xs md:text-sm transition-colors"
+              disabled={state.categories.length === 0}
+              title="Resets the board, making all clues available again, but keeps scores and teams."
+            >
+              <RotateCcw size={16} /> Reset Board
+            </button>
+
+            {/* 2. Start Game button (Sync) */}
             <button 
               onClick={syncGameState}
               className="flex items-center gap-2 bg-green-600 hover:bg-green-700 px-4 py-2 rounded font-bold text-xs md:text-sm transition-colors"
               disabled={state.categories.length === 0}
             >
-              <Check size={16} /> Start Game (Sync)
+              <Check size={16} /> Start Game
             </button>
             
-            {/* Launch Board button (now only opens the window) */}
+            {/* 3. NEW: Final Jeoparty Button */}
+            <button 
+              onClick={() => dispatch({ type: 'SET_FINAL_JEOPARDY', payload: { clue: state.finalClue } })}
+              className="flex items-center gap-2 bg-purple-600 hover:bg-purple-700 px-4 py-2 rounded font-bold text-xs md:text-sm transition-colors"
+              disabled={state.categories.length === 0 || state.isFinalJeopardy || !state.finalClue}
+              title="Starts the final round with wagering and a 30-second timer."
+            >
+              <Award size={16} /> Final Jeoparty!
+            </button>
+
+            {/* 4. Launch Board button (Rightmost) */}
             <button 
               onClick={launchBoard}
               className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 px-4 py-2 rounded font-bold text-xs md:text-sm transition-colors"
@@ -546,12 +737,14 @@ export default function App() {
 
       {/* MAIN AREA */}
       <main className="flex-1 overflow-auto flex flex-col relative">
-        <GameBoard 
-          categories={state.categories} 
-          answeredClues={state.answeredClues} 
-          onClueClick={(clue) => dispatch({ type: 'SELECT_CLUE', payload: clue })}
-          isHost={state.role === 'HOST'}
-        />
+        {!state.isFinalJeopardy && (
+          <GameBoard 
+            categories={state.categories} 
+            answeredClues={state.answeredClues} 
+            onClueClick={(clue) => dispatch({ type: 'SELECT_CLUE', payload: clue })}
+            isHost={state.role === 'HOST'}
+          />
+        )}
 
         {/* CLUE OVERLAY (SHARED VISUALS) */}
         {state.activeClue && (
@@ -563,86 +756,103 @@ export default function App() {
               {state.timer}s
             </div>
 
+            {/* QUESTION/ANSWER CONTENT */}
             <div className="max-w-5xl flex-1 flex items-center justify-center flex-col gap-8">
+              {state.isFinalJeopardy && ( // Display category header for Final Jeopardy
+                 <div className="text-4xl font-extrabold text-yellow-400 uppercase tracking-widest mb-4">
+                   Final Jeoparty Category: {state.activeClue.category}
+                 </div>
+              )}
               <h2 className="text-3xl md:text-5xl font-bold text-white uppercase leading-relaxed drop-shadow-lg shadow-black">
                 {state.showAnswer ? state.activeClue.answer : state.activeClue.question}
               </h2>
+              
+              {state.isFinalJeopardy && state.role === 'BOARD' && !state.showAnswer && (
+                  <p className="text-xl text-yellow-300 animate-pulse mt-4">Wagering and writing period...</p>
+              )}
             </div>
             
             {/* HOST CONTROLS */}
             {state.role === 'HOST' && (
               <div className="w-full bg-black/80 p-4 rounded-t-xl border-t-4 border-yellow-500 mt-auto backdrop-blur-md">
-                 <div className="flex flex-col gap-4 items-center">
-                   
-                   {/* HOST PRIVATE ANSWER VIEW */}
-                   <div className="bg-yellow-100 text-yellow-900 px-6 py-2 rounded-lg shadow-lg border-l-8 border-yellow-500 flex flex-col items-center min-w-[300px]">
+                <div className="flex flex-col gap-4 items-center">
+                  
+                  {/* HOST PRIVATE ANSWER VIEW (Always shown) */}
+                  <div className="bg-yellow-100 text-yellow-900 px-6 py-2 rounded-lg shadow-lg border-l-8 border-yellow-500 flex flex-col items-center min-w-[300px]">
                       <span className="text-[10px] font-black tracking-widest uppercase text-yellow-600 mb-1">Host Eyes Only</span>
                       <div className="text-lg font-bold text-center">
-                        <span className="text-yellow-700 mr-2">ANSWER:</span>
+                        <span className="text-yellow-700 mr-2">{state.isFinalJeopardy ? 'FINAL ANSWER:' : 'ANSWER:'}</span>
                         {state.activeClue.answer}
                       </div>
-                   </div>
+                  </div>
 
-                   {/* MAIN CONTROLS ROW */}
-                   <div className="flex flex-wrap justify-center gap-4 w-full">
-                      {/* 1. Timer Control */}
-                      <button 
-                        onClick={() => dispatch({ type: state.isTimerRunning ? 'STOP_TIMER' : 'START_TIMER' })}
-                        className={`px-6 py-3 font-bold text-lg rounded shadow-lg flex items-center gap-2 ${state.isTimerRunning ? 'bg-red-600 hover:bg-red-700 text-white' : 'bg-blue-600 hover:bg-blue-700 text-white'}`}
-                      >
-                        <Clock size={20} />
-                        {state.isTimerRunning ? 'Stop Timer' : 'Start 5s Timer'}
-                      </button>
-
-                      {/* 2. Reveal/Close Control */}
-                      {!state.showAnswer ? (
+                  {/* Conditional Controls */}
+                  {state.isFinalJeopardy ? (
+                    <FinalJeopardyHostControls state={state} dispatch={dispatch} />
+                  ) : (
+                    /* --- STANDARD JEOPARDY CONTROLS --- */
+                    <>
+                      {/* MAIN CONTROLS ROW */}
+                      <div className="flex flex-wrap justify-center gap-4 w-full">
+                        {/* 1. Timer Control */}
                         <button 
-                          onClick={() => dispatch({ type: 'REVEAL_ANSWER' })}
-                          className="px-8 py-3 bg-yellow-500 hover:bg-yellow-400 text-blue-900 font-bold text-xl rounded shadow-lg transition-transform hover:scale-105"
+                          onClick={() => dispatch({ type: state.isTimerRunning ? 'STOP_TIMER' : 'START_TIMER' })}
+                          className={`px-6 py-3 font-bold text-lg rounded shadow-lg flex items-center gap-2 ${state.isTimerRunning ? 'bg-red-600 hover:bg-red-700 text-white' : 'bg-blue-600 hover:bg-blue-700 text-white'}`}
                         >
-                          Reveal to Players
+                          <Clock size={20} />
+                          {state.isTimerRunning ? 'Stop Timer' : 'Start 5s Timer'}
                         </button>
-                      ) : (
-                        <button 
-                          onClick={() => dispatch({ type: 'CLOSE_CLUE' })}
-                          className="px-8 py-3 bg-gray-600 hover:bg-gray-500 text-white font-bold text-xl rounded shadow-lg transition-transform hover:scale-105"
-                        >
-                          Close Question
-                        </button>
-                      )}
-                   </div>
 
-                   {/* Team Scoring Controls */}
-                   <div className="flex flex-wrap justify-center gap-4 w-full border-t border-gray-700 pt-4 mt-2">
-                      {state.teams.map(team => (
-                        <div key={team.id} className="flex flex-col items-center bg-slate-800 p-2 rounded-lg border border-slate-600 min-w-[100px]">
-                          <span className="font-bold text-white mb-1 truncate max-w-[150px] text-sm">{team.name}</span>
-                          <div className="flex gap-1">
-                            <button 
-                              onClick={() => dispatch({ type: 'UPDATE_SCORE', payload: { teamId: team.id, points: state.activeClue.value } })}
-                              className="p-2 bg-green-600 hover:bg-green-500 rounded text-white transition-colors shadow-md"
-                              title="Correct"
-                            >
-                              <Check size={16} />
-                            </button>
-                            <button 
-                              onClick={() => dispatch({ type: 'UPDATE_SCORE', payload: { teamId: team.id, points: -state.activeClue.value } })}
-                              className="p-2 bg-red-600 hover:bg-red-500 rounded text-white transition-colors shadow-md"
-                              title="Incorrect"
-                            >
-                              <X size={16} />
-                            </button>
+                        {/* 2. Reveal/Close Control */}
+                        {!state.showAnswer ? (
+                          <button 
+                            onClick={() => dispatch({ type: 'REVEAL_ANSWER' })}
+                            className="px-8 py-3 bg-yellow-500 hover:bg-yellow-400 text-blue-900 font-bold text-xl rounded shadow-lg transition-transform hover:scale-105"
+                          >
+                            Reveal to Players
+                          </button>
+                        ) : (
+                          <button 
+                            onClick={() => dispatch({ type: 'CLOSE_CLUE' })}
+                            className="px-8 py-3 bg-gray-600 hover:bg-gray-500 text-white font-bold text-xl rounded shadow-lg transition-transform hover:scale-105"
+                          >
+                            Close Question
+                          </button>
+                        )}
+                      </div>
+                      
+                      {/* Team Scoring Controls */}
+                      <div className="flex flex-wrap justify-center gap-4 w-full border-t border-gray-700 pt-4 mt-2">
+                        {state.teams.map(team => (
+                          <div key={team.id} className="flex flex-col items-center bg-slate-800 p-2 rounded-lg border border-slate-600 min-w-[100px]">
+                            <span className="font-bold text-white mb-1 truncate max-w-[150px] text-sm">{team.name}</span>
+                            <div className="flex gap-1">
+                              <button 
+                                onClick={() => dispatch({ type: 'UPDATE_SCORE', payload: { teamId: team.id, points: state.activeClue.value } })}
+                                className="p-2 bg-green-600 hover:bg-green-500 rounded text-white transition-colors shadow-md"
+                                title="Correct"
+                              >
+                                <Check size={16} />
+                              </button>
+                              <button 
+                                onClick={() => dispatch({ type: 'UPDATE_SCORE', payload: { teamId: team.id, points: -state.activeClue.value } })}
+                                className="p-2 bg-red-600 hover:bg-red-500 rounded text-white transition-colors shadow-md"
+                                title="Incorrect"
+                              >
+                                <X size={16} />
+                              </button>
+                            </div>
                           </div>
-                        </div>
-                      ))}
-                   </div>
-                 </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
             )}
           </div>
         )}
       </main>
-
     </div>
   );
 }
