@@ -3,8 +3,8 @@ import { X, Check, Info, HelpCircle, Award, Monitor, Upload, Users, Settings, Cl
 
 // --- CONSTANTS ---
 const CHANNEL_NAME = 'jeoparty_channel_v1';
-const TIME_UP_SOUND = 'https://assets.mixkit.co/active_storage/sfx/950/950-preview.mp3'; // Generic Buzzer
-const FINAL_JEOPARDY_MUSIC = 'https://assets.mixkit.co/active_storage/sfx/2219/2219-preview.mp3'; // Dramatic, sustained thinking music
+const TIME_UP_SOUND = '/times-up.mp3'; 
+const FINAL_JEOPARDY_MUSIC = '/final.mp3'; 
 
 // --- CSV PARSER HELPER ---
 const parseCSV = (text) => {
@@ -38,8 +38,14 @@ const parseCSV = (text) => {
   };
 
   for (let i = 1; i < lines.length; i++) {
-    if (!lines[i].trim()) continue;
-    const row = parseLine(lines[i]);
+    const line = lines[i].trim();
+    // Ignore empty lines and lines that start with the template comment marker
+    if (!line || line.startsWith('//')) continue; 
+
+    const row = parseLine(line);
+    // Ensure the row has enough columns to match the headers
+    if (row.length < headers.length) continue; 
+    
     const clue = {};
     headers.forEach((h, idx) => clue[h] = row[idx]);
     if (clue.category && clue.value && clue.question && clue.answer) {
@@ -52,17 +58,25 @@ const parseCSV = (text) => {
 
   // 1. Separate Final Jeopardy Clue
   for (const clue of rawClues) {
-    // Check if the category or value is explicitly marked for Final Jeopardy
+    // Check if the category or value is explicitly marked for Final Jeopardy/Jeoparty
     const categoryUpper = clue.category.toUpperCase().trim();
     const valueUpper = clue.value.toUpperCase().trim();
     
-    if (!finalClue && (categoryUpper.includes('FINAL JEOPARDY') || valueUpper === 'FJ' || valueUpper === 'FINAL')) {
+    // Check for 'FINAL JEOPARDY', 'FINAL JEOPARTY', 'FJ', or 'FINAL'
+    const isFinal = categoryUpper.includes('FINAL JEOPARDY') ||
+                    categoryUpper.includes('FINAL JEOPARTY') ||
+                    valueUpper.includes('FINAL JEOPARDY') ||
+                    valueUpper.includes('FINAL JEOPARTY') ||
+                    valueUpper === 'FJ' || 
+                    valueUpper === 'FINAL';
+
+    if (!finalClue && isFinal) {
       finalClue = {
         id: 'FINAL_JEOPARDY_CLUE', 
         category: clue.category,
         question: clue.question,
         answer: clue.answer,
-        value: 0 // Value is 0 for wagering round
+        value: 0 
       };
     } else {
       regularClues.push(clue);
@@ -95,7 +109,7 @@ const parseCSV = (text) => {
       return cat;
     });
 
-  return { categories, finalClue }; // Return both categories and the final clue
+  return { categories, finalClue }; 
 };
 
 // --- STATE MANAGEMENT ---
@@ -195,6 +209,36 @@ function gameReducer(state, action) {
       return state;
   }
 }
+
+// --- CSV TEMPLATE DOWNLOADER (UPDATED) ---
+const downloadCSVTemplate = () => {
+    // Instructions for the user - COMMAS RE-ADDED AND PADDED FOR VISUAL ALIGNMENT
+    const headers = "Category,Value,Question,Answer";
+    const sampleData = [
+      // Sample Category 1 with full value set
+      "CATEGORY 1,200,\"What is your easiest question?\",\"What is the easiest answer?\"",
+      "CATEGORY 1,400,\"What is your second question?\",\"What is the second answer?\"",
+      "CATEGORY 1,600,\"What is your middle question?\",\"What is the middle answer?\"",
+      "CATEGORY 1,800,\"What is your fourth question?\",\"What is the fourth answer?\"",
+      "CATEGORY 1,1000,\"What is your hardest question?\",\"What is the hardest answer?\"",
+      // Final Jeoparty Example
+      "FINAL JEOPARTY,0,\"This is your Final Jeoparty question.\",\"What is the final answer?\""
+    ];
+    
+    const csvContent = [headers, ...sampleData].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', 'jeoparty_template.csv');
+    link.style.visibility = 'hidden';
+    
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+};
 
 // --- COMPONENTS ---
 
@@ -300,6 +344,8 @@ const SetupScreen = ({ onStart }) => {
         <div className="space-y-6">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">Upload Questions (CSV)</label>
+            
+            {/* FILE UPLOAD INPUT */}
             <div className="border-2 border-dashed border-gray-300 rounded-lg p-4 text-center hover:bg-gray-50 transition-colors">
               <input type="file" accept=".csv" onChange={handleFile} className="hidden" id="csv-upload" />
               <label htmlFor="csv-upload" className="cursor-pointer flex flex-col items-center">
@@ -310,6 +356,18 @@ const SetupScreen = ({ onStart }) => {
                 <span className="text-xs text-gray-400 mt-1">Optional (Defaults available)</span>
               </label>
             </div>
+            
+            {/* DOWNLOAD TEMPLATE LINK */}
+            <button 
+                onClick={downloadCSVTemplate}
+                className="w-full mt-2 py-2 text-sm text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 rounded-md transition-colors font-medium border border-indigo-200 flex items-center justify-center gap-2"
+                title="Download CSV template with required headers: Category,Value,Question,Answer"
+            >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                Download JeoParty Template (.csv)
+            </button>
+
+
             {file && (
               <p className="text-xs text-gray-500 mt-2">
                 Note: Ensure one row has **"FINAL JEOPARDY"** in the Category column.
@@ -543,6 +601,8 @@ const FinalJeopardyHostControls = ({ state, dispatch }) => {
 export default function App() {
   const [state, dispatch] = useReducer(gameReducer, initialState);
   const channelRef = useRef(null);
+  
+  // Use new local paths for Audio objects
   const audioRef = useRef(new Audio(TIME_UP_SOUND));
   const finalAudioRef = useRef(new Audio(FINAL_JEOPARDY_MUSIC));
   finalAudioRef.current.loop = true; 
@@ -638,7 +698,11 @@ export default function App() {
        finalAudioRef.current.pause();
        finalAudioRef.current.currentTime = 0;
        
-       audioRef.current.play().catch(e => console.log("Audio play failed", e));
+       // Conditional: ONLY play the standard time-up sound if it's NOT Final Jeopardy
+       if (!state.isFinalJeopardy) {
+           audioRef.current.play().catch(e => console.log("Audio play failed", e)); 
+       }
+       
        dispatch({ type: 'STOP_TIMER' });
     } else if (!state.isTimerRunning) {
       // Ensure music stops if timer is manually stopped or the clue is closed
