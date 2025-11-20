@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useReducer, useRef, useMemo } from 'react';
 import { X, Check, Info, HelpCircle, Award, Monitor, Upload, Users, Settings, Clock, Volume2, RotateCcw } from 'lucide-react';
 
-// --- CONSTANTS ---
+// NOTE: This application requires two audio files named 'times-up.mp3' and 'final.mp3'
+// to be placed in the public/ folder of your project for sound effects to work locally.
 const CHANNEL_NAME = 'jeoparty_channel_v1';
 const TIME_UP_SOUND = '/times-up.mp3'; 
 const FINAL_JEOPARDY_MUSIC = '/final.mp3'; 
@@ -122,10 +123,11 @@ const initialState = {
   answeredClues: [],
   showAnswer: false,
   gameStarted: false,
-  timer: 5,
+  timer: 5, 
   isTimerRunning: false,
   isFinalJeopardy: false, 
-  finalClue: null,       
+  finalClue: null,
+  finalJeopardyStage: 'INACTIVE', // INACTIVE, CATEGORY, QUESTION, ANSWER      
 };
 
 function gameReducer(state, action) {
@@ -150,7 +152,11 @@ function gameReducer(state, action) {
         isTimerRunning: false 
       };
     case 'REVEAL_ANSWER':
+       if (state.isFinalJeopardy) {
+        return { ...state, showAnswer: true, isTimerRunning: false, finalJeopardyStage: 'ANSWER' };
+      }
       return { ...state, showAnswer: true, isTimerRunning: false };
+      
     case 'CLOSE_CLUE':
       return {
         ...state,
@@ -158,7 +164,8 @@ function gameReducer(state, action) {
         answeredClues: state.isFinalJeopardy ? state.answeredClues : [...state.answeredClues, state.activeClue.id],
         showAnswer: false,
         isTimerRunning: false,
-        isFinalJeopardy: false, 
+        isFinalJeopardy: false,
+        finalJeopardyStage: 'INACTIVE', // Reset stage
       };
     case 'UPDATE_SCORE':
       return {
@@ -172,12 +179,17 @@ function gameReducer(state, action) {
     case 'SET_ROLE':
       return { ...state, role: action.payload };
     case 'START_TIMER':
+      // Standard duration is 5 seconds, Final Jeoparty duration is 30 seconds
       const duration = state.isFinalJeopardy ? 30 : 5; 
-      return { ...state, isTimerRunning: true, timer: duration };
+      // Reset timer to full duration if starting, otherwise keep current time
+      const timeToSet = state.isFinalJeopardy ? duration : state.timer > 0 ? state.timer : duration;
+      return { ...state, isTimerRunning: true, timer: timeToSet };
     case 'TICK_TIMER':
       return { ...state, timer: Math.max(0, state.timer - 1) };
     case 'STOP_TIMER':
       return { ...state, isTimerRunning: false };
+
+    // --- NEW FINAL JEOPARDY FLOW ACTIONS ---
     case 'SET_FINAL_JEOPARDY': 
       const clue = state.finalClue;
       // Mark Final Jeopardy as answered to prevent re-starting immediately
@@ -190,10 +202,22 @@ function gameReducer(state, action) {
         isFinalJeopardy: true,
         activeClue: clue,
         showAnswer: false,
-        timer: 30, 
+        timer: 30, // Default duration, but not running yet
         isTimerRunning: false,
         answeredClues: newAnsweredClues,
+        finalJeopardyStage: 'CATEGORY', // Show category for wagering
       };
+
+    case 'REVEAL_FINAL_QUESTION':
+      // Move from CATEGORY stage to QUESTION stage, DO NOT start the timer
+      return {
+        ...state,
+        finalJeopardyStage: 'QUESTION',
+        isTimerRunning: false, // <-- Change: Timer does not start automatically
+        timer: 30, 
+      };
+    // --- END NEW FINAL JEOPARDY FLOW ACTIONS ---
+
     case 'RESET_BOARD':
       // Keeps teams, scores, and questions, but resets the board state
       return {
@@ -201,9 +225,10 @@ function gameReducer(state, action) {
         activeClue: null,
         answeredClues: [], 
         showAnswer: false,
-        timer: 5,
+        timer: 5, 
         isTimerRunning: false,
-        isFinalJeopardy: false, 
+        isFinalJeopardy: false,
+        finalJeopardyStage: 'INACTIVE', 
       };
     default:
       return state;
@@ -220,9 +245,9 @@ const downloadCSVTemplate = () => {
       "CATEGORY 1,400,\"What is your second question?\",\"What is the second answer?\"",
       "CATEGORY 1,600,\"What is your middle question?\",\"What is the middle answer?\"",
       "CATEGORY 1,800,\"What is your fourth question?\",\"What is the fourth answer?\"",
-      "CATEGORY 1,1000,\"What is your hardest question?\",\"What is the hardest answer?\"",
+      "CATEGORY 1,1000,\"What is your hardest question?\",\"What is your hardest answer?\"",
       // Final Jeoparty Example
-      "FINAL JEOPARTY,0,\"This is your Final Jeoparty question.\",\"What is the final answer?\""
+      "FINAL JEOPARDY,0,\"This is your Final Jeoparty question.\",\"What is the final answer?\""
     ];
     
     const csvContent = [headers, ...sampleData].join('\n');
@@ -243,8 +268,8 @@ const downloadCSVTemplate = () => {
 // --- COMPONENTS ---
 
 const SetupScreen = ({ onStart }) => {
-  const [teamCount, setTeamCount] = useState(2);
-  const [teamNames, setTeamNames] = useState(['Team 1', 'Team 2']);
+  const [teamCount, setTeamCount] = useState(4);
+  const [teamNames, setTeamNames] = useState(['Blue 1', 'Red 2', 'Green 3', 'Yellow 4']);
   const [file, setFile] = useState(null);
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -460,7 +485,7 @@ const GameBoard = ({ categories, answeredClues, onClueClick, isHost }) => (
 );
 
 // --- FINAL JEOPARDY HOST CONTROLS COMPONENT ---
-const FinalJeopardyHostControls = ({ state, dispatch }) => {
+const FinalJeopardyHostControls = ({ state, dispatch, isQuestionStage, isAnswerStage }) => {
   const [wagers, setWagers] = useState(state.teams.reduce((acc, team) => ({ ...acc, [team.id]: '' }), {}));
   const [results, setResults] = useState(state.teams.reduce((acc, team) => ({ ...acc, [team.id]: 'PENDING' }), {})); // PENDING, CORRECT, INCORRECT
 
@@ -510,26 +535,29 @@ const FinalJeopardyHostControls = ({ state, dispatch }) => {
   return (
     <>
       <div className="flex flex-wrap justify-center gap-4 w-full">
-        {/* Timer Control */}
-        <button 
-          onClick={() => dispatch({ type: state.isTimerRunning ? 'STOP_TIMER' : 'START_TIMER' })}
-          className={`px-6 py-3 font-bold text-lg rounded shadow-lg flex items-center gap-2 ${state.isTimerRunning ? 'bg-red-600 hover:bg-red-700 text-white' : 'bg-blue-600 hover:bg-blue-700 text-white'}`}
-          disabled={state.showAnswer}
-        >
-          <Clock size={20} />
-          {state.isTimerRunning ? 'Stop Timer' : 'Start 30s Timer'}
-        </button>
+        {/* Timer Control - Only visible during QUESTION stage */}
+        {isQuestionStage && (
+          <button 
+            onClick={() => dispatch({ type: state.isTimerRunning ? 'STOP_TIMER' : 'START_TIMER' })}
+            className={`px-6 py-3 font-bold text-lg rounded shadow-lg flex items-center gap-2 ${state.isTimerRunning ? 'bg-red-600 hover:bg-red-700 text-white' : 'bg-blue-600 hover:bg-blue-700 text-white'}`}
+          >
+            <Clock size={20} />
+            {state.isTimerRunning ? 'Stop Timer' : (state.timer === 30 ? 'Start 30s Timer' : 'Resume Timer')}
+          </button>
+        )}
 
-        {/* Reveal/Finalize Control */}
-        {!state.showAnswer ? (
+        {/* Reveal Answer Control - Only visible in QUESTION stage when timer is 0 or manually stopped */}
+        {isQuestionStage && !state.isTimerRunning && (
           <button 
             onClick={() => dispatch({ type: 'REVEAL_ANSWER' })}
             className="px-8 py-3 bg-yellow-500 hover:bg-yellow-400 text-blue-900 font-bold text-xl rounded shadow-lg transition-transform hover:scale-105"
-            disabled={state.isTimerRunning}
           >
             Reveal Final Answer
           </button>
-        ) : (
+        )}
+        
+        {/* Finalize Scores Control - Only visible in ANSWER stage */}
+        {isAnswerStage && (
           <button 
             onClick={calculateFinalScore}
             className={`px-8 py-3 font-bold text-xl rounded shadow-lg transition-transform hover:scale-105 ${isScoringReady ? 'bg-green-600 hover:bg-green-700 text-white' : 'bg-gray-400 text-gray-700 cursor-not-allowed'}`}
@@ -540,8 +568,8 @@ const FinalJeopardyHostControls = ({ state, dispatch }) => {
         )}
       </div>
 
-      {/* Final Jeopardy Wagers and Results (Only visible after answer is revealed) */}
-      {state.showAnswer && (
+      {/* Final Jeopardy Wagers and Results (Only visible in ANSWER stage) */}
+      {isAnswerStage && (
         <div className="w-full border-t border-gray-700 pt-4 mt-2">
           <h4 className="text-lg font-bold text-yellow-400 mb-3">Wagering and Scoring</h4>
           <div className="flex flex-wrap justify-center gap-4">
@@ -549,6 +577,7 @@ const FinalJeopardyHostControls = ({ state, dispatch }) => {
               <div key={team.id} className="flex flex-col items-center bg-slate-800 p-3 rounded-lg border border-slate-600 min-w-[200px]">
                 <span className="font-bold text-white mb-2 truncate max-w-[180px] text-base">{team.name} (Score: {team.score})</span>
                 
+                {/* Wager Input is shown in ANSWER stage to log what teams wagered for scoring */}
                 <input
                   type="number"
                   placeholder={`Max Wager: ${team.score}`}
@@ -603,12 +632,14 @@ export default function App() {
   const channelRef = useRef(null);
   
   // Use new local paths for Audio objects
+  // NOTE: Audio will not play in this environment because the MP3 files are missing.
   const audioRef = useRef(new Audio(TIME_UP_SOUND));
   const finalAudioRef = useRef(new Audio(FINAL_JEOPARDY_MUSIC));
   finalAudioRef.current.loop = true; 
 
   // --- 1. BROADCAST CHANNEL SETUP ---
   useEffect(() => {
+    // BroadcastChannel only works when the two windows are in the same origin (same browser instance/iframe).
     channelRef.current = new BroadcastChannel(CHANNEL_NAME);
     
     channelRef.current.onmessage = (event) => {
@@ -643,7 +674,8 @@ export default function App() {
           timer: state.timer,
           isTimerRunning: state.isTimerRunning,
           isFinalJeopardy: state.isFinalJeopardy, 
-          finalClue: state.finalClue, 
+          finalClue: state.finalClue,
+          finalJeopardyStage: state.finalJeopardyStage, // Include new stage
         }
       });
       console.log("Game state synchronized to board channel.");
@@ -655,6 +687,8 @@ export default function App() {
     const height = 720;
     const left = (window.screen.width - width) / 2;
     const top = (window.screen.height - height) / 2;
+    
+    // Open a new, clean window for the board view
     window.open(
       `${window.location.pathname}?role=board`, 
       'JeoPartyBoard', 
@@ -676,13 +710,14 @@ export default function App() {
 
       return () => clearTimeout(timeout);
     }
-  }, [state.teams, state.activeClue, state.answeredClues, state.showAnswer, state.timer, state.isTimerRunning, state.isFinalJeopardy]); 
+  }, [state.teams, state.activeClue, state.answeredClues, state.showAnswer, state.timer, state.isTimerRunning, state.isFinalJeopardy, state.finalJeopardyStage]); 
 
   // --- 3. TIMER LOGIC & MUSIC CONTROL ---
   useEffect(() => {
     let interval;
     if (state.isTimerRunning && state.timer > 0) {
-      if (state.isFinalJeopardy) {
+      // Start music only when in the QUESTION stage of Final Jeoparty
+      if (state.isFinalJeopardy && state.finalJeopardyStage === 'QUESTION') {
         audioRef.current.pause(); 
         finalAudioRef.current.play().catch(e => console.log("Final audio play failed", e));
       } else {
@@ -704,13 +739,19 @@ export default function App() {
        }
        
        dispatch({ type: 'STOP_TIMER' });
+
+       // Auto-reveal answer if Final Jeopardy timer hits 0
+       if (state.isFinalJeopardy && state.finalJeopardyStage === 'QUESTION') {
+          dispatch({ type: 'REVEAL_ANSWER' });
+       }
+
     } else if (!state.isTimerRunning) {
       // Ensure music stops if timer is manually stopped or the clue is closed
       finalAudioRef.current.pause();
       finalAudioRef.current.currentTime = 0;
     }
     return () => clearInterval(interval);
-  }, [state.isTimerRunning, state.timer, state.isFinalJeopardy]);
+  }, [state.isTimerRunning, state.timer, state.isFinalJeopardy, state.finalJeopardyStage]);
 
 
   if (state.role === 'SETUP') {
@@ -718,7 +759,7 @@ export default function App() {
   }
 
   // --- BOARD WAITING SCREEN ---
-  if (state.role === 'BOARD' && state.categories.length === 0) {
+  if (state.role === 'BOARD' && state.categories.length === 0 && state.finalJeopardyStage === 'INACTIVE') {
     return (
       <div className="min-h-screen bg-slate-900 text-white flex items-center justify-center font-sans">
         <div className="text-center p-8 border-4 border-yellow-400 rounded-xl bg-blue-900/50 shadow-2xl">
@@ -773,7 +814,7 @@ export default function App() {
             <button 
               onClick={syncGameState}
               className="flex items-center gap-2 bg-green-600 hover:bg-green-700 px-4 py-2 rounded font-bold text-xs md:text-sm transition-colors"
-              disabled={state.categories.length === 0}
+              disabled={state.categories.length === 0 || state.activeClue} // Disable if clue is active
             >
               <Check size={16} /> Start Game
             </button>
@@ -782,7 +823,7 @@ export default function App() {
             <button 
               onClick={() => dispatch({ type: 'SET_FINAL_JEOPARDY', payload: { clue: state.finalClue } })}
               className="flex items-center gap-2 bg-purple-600 hover:bg-purple-700 px-4 py-2 rounded font-bold text-xs md:text-sm transition-colors"
-              disabled={state.categories.length === 0 || state.isFinalJeopardy || !state.finalClue}
+              disabled={state.categories.length === 0 || state.finalJeopardyStage !== 'INACTIVE' || !state.finalClue}
               title="Starts the final round with wagering and a 30-second timer."
             >
               <Award size={16} /> Final Jeoparty!
@@ -801,7 +842,8 @@ export default function App() {
 
       {/* MAIN AREA */}
       <main className="flex-1 overflow-auto flex flex-col relative">
-        {!state.isFinalJeopardy && (
+        {/* Hide GameBoard if ANY Final Jeoparty stage is active */}
+        {state.finalJeopardyStage === 'INACTIVE' && (
           <GameBoard 
             categories={state.categories} 
             answeredClues={state.answeredClues} 
@@ -809,30 +851,70 @@ export default function App() {
             isHost={state.role === 'HOST'}
           />
         )}
+        
+        {/* --- FINAL JEOPARTY WAGERING/CATEGORY SCREEN (CATEGORY Stage) --- */}
+        {state.finalJeopardyStage === 'CATEGORY' && state.finalClue && (
+            <div className="absolute inset-0 z-20 bg-blue-900 flex flex-col items-center justify-center p-8 text-center animate-in fade-in duration-300">
+                <div className="max-w-5xl flex-1 flex items-center justify-center flex-col gap-8">
+                    <div className="text-3xl md:text-5xl font-extrabold text-yellow-400 uppercase tracking-widest mb-4">
+                        FINAL JEOPARTY
+                    </div>
+                    <h2 className="text-5xl md:text-7xl font-black text-white leading-tight drop-shadow-lg shadow-black p-4 border-4 border-yellow-500 rounded-xl bg-black/30">
+                        {state.finalClue.category || 'No Category Found'}
+                    </h2>
+                    <p className="text-xl text-gray-300 mt-4">
+                        Teams, please finalize your wagers now.
+                    </p>
+                </div>
 
-        {/* CLUE OVERLAY (SHARED VISUALS) */}
-        {state.activeClue && (
+                {state.role === 'HOST' && (
+                    <div className="mt-auto p-4">
+                        <button 
+                            onClick={() => dispatch({ type: 'REVEAL_FINAL_QUESTION' })}
+                            className="px-10 py-4 bg-green-600 hover:bg-green-700 text-white font-bold text-2xl rounded-lg shadow-xl transition-transform hover:scale-105 flex items-center gap-3"
+                        >
+                            <Monitor size={28} /> Reveal Question
+                        </button>
+                    </div>
+                )}
+            </div>
+        )}
+
+        {/* --- CLUE OVERLAY (SHARED VISUALS for standard clue, or Final Jeoparty QUESTION/ANSWER stages) --- */}
+        {state.activeClue && state.finalJeopardyStage !== 'CATEGORY' && (
           <div className="absolute inset-0 z-20 bg-blue-900 flex flex-col items-center justify-center p-8 text-center animate-in fade-in duration-300">
             
             {/* TIMER DISPLAY (VISIBLE TO ALL) */}
-            <div className={`absolute top-8 right-8 flex items-center gap-2 text-4xl font-mono font-black ${state.timer === 0 ? 'text-red-500 animate-pulse' : 'text-yellow-400'}`}>
-              <Clock size={40} />
-              {state.timer}s
-            </div>
+            {/* Timer is shown if it's running, or if it's the Final Jeopardy QUESTION/ANSWER stage */}
+            {((state.isTimerRunning || (!state.isFinalJeopardy && state.timer === 0)) || state.isFinalJeopardy) && (
+                <div className={`absolute top-8 right-8 flex items-center gap-2 text-4xl font-mono font-black ${state.timer === 0 && state.isFinalJeopardy ? 'text-red-500 animate-pulse' : 'text-yellow-400'}`}>
+                <Clock size={40} />
+                {state.timer}s
+                </div>
+            )}
 
             {/* QUESTION/ANSWER CONTENT */}
             <div className="max-w-5xl flex-1 flex items-center justify-center flex-col gap-8">
-              {state.isFinalJeopardy && ( // Display category header for Final Jeopardy
-                 <div className="text-4xl font-extrabold text-yellow-400 uppercase tracking-widest mb-4">
-                   Final Jeoparty Category: {state.activeClue.category}
-                 </div>
-              )}
-              <h2 className="text-3xl md:text-5xl font-bold text-white uppercase leading-relaxed drop-shadow-lg shadow-black">
-                {state.showAnswer ? state.activeClue.answer : state.activeClue.question}
-              </h2>
-              
-              {state.isFinalJeopardy && state.role === 'BOARD' && !state.showAnswer && (
-                  <p className="text-xl text-yellow-300 animate-pulse mt-4">Wagering and writing period...</p>
+              {/* FINAL JEOPARDY QUESTION/ANSWER */}
+              {state.isFinalJeopardy ? (
+                  <>
+                    <div className="text-4xl font-extrabold text-yellow-400 uppercase tracking-widest mb-4">
+                       Final Jeoparty Category: {state.activeClue.category}
+                    </div>
+                    <h2 className="text-3xl md:text-5xl font-bold text-white uppercase leading-relaxed drop-shadow-lg shadow-black">
+                        {state.finalJeopardyStage === 'ANSWER' 
+                          ? state.activeClue.answer 
+                          : state.activeClue.question}
+                    </h2>
+                    {state.finalJeopardyStage === 'QUESTION' && state.role === 'BOARD' && state.isTimerRunning && (
+                        <p className="text-xl text-yellow-300 animate-pulse mt-4">Writing period in progress...</p>
+                    )}
+                  </>
+              ) : (
+                  /* STANDARD CLUE QUESTION/ANSWER */
+                  <h2 className="text-3xl md:text-5xl font-bold text-white uppercase leading-relaxed drop-shadow-lg shadow-black">
+                    {state.showAnswer ? state.activeClue.answer : state.activeClue.question}
+                  </h2>
               )}
             </div>
             
@@ -852,9 +934,15 @@ export default function App() {
 
                   {/* Conditional Controls */}
                   {state.isFinalJeopardy ? (
-                    <FinalJeopardyHostControls state={state} dispatch={dispatch} />
+                    /* Final Jeoparty Controls (QUESTION and ANSWER stages) */
+                    <FinalJeopardyHostControls 
+                      state={state} 
+                      dispatch={dispatch} 
+                      isQuestionStage={state.finalJeopardyStage === 'QUESTION'}
+                      isAnswerStage={state.finalJeopardyStage === 'ANSWER'}
+                    />
                   ) : (
-                    /* --- STANDARD JEOPARDY CONTROLS --- */
+                    /* --- STANDARD JEOPARTY CONTROLS --- */
                     <>
                       {/* MAIN CONTROLS ROW */}
                       <div className="flex flex-wrap justify-center gap-4 w-full">
@@ -889,18 +977,18 @@ export default function App() {
                       <div className="flex flex-wrap justify-center gap-4 w-full border-t border-gray-700 pt-4 mt-2">
                         {state.teams.map(team => (
                           <div key={team.id} className="flex flex-col items-center bg-slate-800 p-2 rounded-lg border border-slate-600 min-w-[100px]">
-                            <span className="font-bold text-white mb-1 truncate max-w-[150px] text-sm">{team.name}</span>
+                            <span className="font-bold text-white mb-1 truncate max-w-[150px]">{team.name}</span>
                             <div className="flex gap-1">
                               <button 
                                 onClick={() => dispatch({ type: 'UPDATE_SCORE', payload: { teamId: team.id, points: state.activeClue.value } })}
-                                className="p-2 bg-green-600 hover:bg-green-500 rounded text-white transition-colors shadow-md"
+                                className="p-3 bg-green-600 hover:bg-green-500 rounded text-white transition-colors shadow-md"
                                 title="Correct"
                               >
                                 <Check size={16} />
                               </button>
                               <button 
                                 onClick={() => dispatch({ type: 'UPDATE_SCORE', payload: { teamId: team.id, points: -state.activeClue.value } })}
-                                className="p-2 bg-red-600 hover:bg-red-500 rounded text-white transition-colors shadow-md"
+                                className="p-3 bg-red-600 hover:bg-red-500 rounded text-white transition-colors shadow-md"
                                 title="Incorrect"
                               >
                                 <X size={16} />
